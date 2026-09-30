@@ -1,0 +1,71 @@
+# Construye las 4 imágenes y las publica en GitHub Container Registry (ghcr.io).
+# Así la EC2 (o cualquier clúster) solo descarga las imágenes, sin compilar nada.
+name: Imágenes Docker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - backend/**
+      - client/**
+      - socket/**
+      - ai-service/**
+      - .github/workflows/imagenes.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: usn-backend
+            context: backend
+            tag: v1
+          - name: usn-socket
+            context: socket
+            tag: v1
+          - name: usn-ai-service
+            context: ai-service
+            tag: v1
+          # Dos versiones del frontend para la demo de rolling update
+          - name: usn-frontend
+            context: client
+            tag: v1
+          - name: usn-frontend
+            context: client
+            tag: v2
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ghcr.io exige el nombre del dueño en minúsculas
+      - name: Nombre de la imagen
+        id: img
+        run: echo "ref=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${{ matrix.name }}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          push: true
+          build-args: APP_VERSION=${{ matrix.tag }}
+          tags: |
+            ${{ steps.img.outputs.ref }}:${{ matrix.tag }}
+            ${{ steps.img.outputs.ref }}:${{ matrix.tag }}-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ matrix.tag }}
+          cache-from: type=gha,scope=${{ matrix.name }}-${{ matrix.tag }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}-${{ matrix.tag }}

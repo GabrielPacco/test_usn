@@ -1,6 +1,6 @@
 # Guia de Despliegue Automatizado en AWS y Kubernetes (IaC)
 
-Este documento detalla como aprovisionar la infraestructura en AWS con CloudFormation y dejar la aplicacion completa corriendo sobre Kubernetes (k3s) **sin pasos manuales dentro de la instancia**: la plantilla instala k3s, construye las imagenes, las importa y aplica los manifiestos.
+Este documento detalla como aprovisionar la infraestructura en AWS con CloudFormation y dejar la aplicacion completa corriendo sobre Kubernetes (k3s) **sin pasos manuales dentro de la instancia**: la plantilla instala k3s y aplica los manifiestos; las imagenes las construye GitHub Actions y k3s las descarga de `ghcr.io`.
 
 ---
 
@@ -21,7 +21,12 @@ Este documento detalla como aprovisionar la infraestructura en AWS con CloudForm
 - **Opcional:** AWS CLI v2 configurado (`aws configure`) si se prefiere crear el stack por consola de comandos.
 - **Opcional:** un par de claves EC2 para SSH (`vockey` en Learner Lab). Sin clave se puede entrar con **EC2 Instance Connect** desde la consola.
 
-No hace falta Docker Hub: las imagenes se construyen dentro de la EC2.
+No hace falta Docker Hub ni compilar en la EC2: en cada `push` a `main`, el workflow `.github/workflows/imagenes.yml` construye las 4 imagenes y las publica en GitHub Container Registry (`ghcr.io/gabrielpacco/usn-*`). Los paquetes deben ser **publicos** (GitHub → Packages → paquete → Package settings → Change visibility) para que k3s pueda descargarlos sin credenciales.
+
+```
+git push ──► GitHub Actions (build) ──► ghcr.io/gabrielpacco/usn-*:v1 (y usn-frontend:v2)
+CloudFormation ──► EC2 + k3s ──► git clone + kubectl apply ──► k3s descarga las imagenes
+```
 
 ---
 
@@ -45,9 +50,9 @@ Navegador ──► http://<IP>:80 ──► frontend (nginx, 2 replicas)
 ## Paso 1: Crear el stack de CloudFormation
 
 La plantilla `aws/ec2-k8s-template.yaml` crea:
-- Security Group (22 y 80), instancia EC2 Ubuntu 22.04 (`t3.large` por defecto, disco gp3 de 30 GiB) y Elastic IP.
-- Un script `UserData` que instala Docker y k3s, clona `RepoUrl`/`RepoBranch`, construye las imagenes (`v1` de todo y `v2` del frontend para la demo de rolling update), las importa en k3s y ejecuta `kubectl apply -f k8s/`.
-- Una `WaitCondition`: el stack solo queda en **CREATE_COMPLETE** cuando la app responde en el puerto 80 (tarda unos **10-15 minutos**, casi todo en compilar el backend y el frontend).
+- Security Group (22 y 80), instancia EC2 Ubuntu 22.04 (`t3.large` por defecto, disco gp3 de 20 GiB) y Elastic IP.
+- Un script `UserData` que instala k3s, clona `RepoUrl`/`RepoBranch`, crea los Secrets (JWT aleatorio y, si se indican, las claves de Cloudinary) y ejecuta `kubectl apply -f k8s/`.
+- Una `WaitCondition`: el stack solo queda en **CREATE_COMPLETE** cuando la app responde en el puerto 80 (unos **4-6 minutos**: arranque de la EC2, instalacion de k3s, descarga de imagenes y arranque de Spring Boot).
 
 | Parametro | Por defecto | Descripcion |
 |---|---|---|
@@ -154,7 +159,7 @@ k top pods -l app=backend
 
 ```bash
 while true; do curl -s localhost/version; sleep 0.3; done      # terminal 1
-k set image deployment/frontend-deployment frontend=teriyaki08/usn-frontend:v2
+k set image deployment/frontend-deployment frontend=ghcr.io/gabrielpacco/usn-frontend:v2
 k rollout status deployment/frontend-deployment
 k rollout undo deployment/frontend-deployment                  # volver a v1
 ```

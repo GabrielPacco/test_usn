@@ -1,7 +1,8 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
-  Universe Social Network sobre Kubernetes (k3s) en una EC2. Instala k3s y Docker, clona el
-  repositorio, construye las imagenes, las importa en k3s y aplica los manifiestos de k8s/.
+  Universe Social Network sobre Kubernetes (k3s) en una EC2. Instala k3s, clona el repositorio
+  y aplica los manifiestos de k8s/. Las imagenes las construye GitHub Actions y k3s las descarga
+  de ghcr.io, asi que no se compila nada en la instancia.
   El stack termina (CREATE_COMPLETE) solo cuando la aplicacion responde en el puerto 80.
 
 Parameters:
@@ -29,10 +30,10 @@ Parameters:
 
   VolumeSize:
     Type: Number
-    Default: 30
-    MinValue: 20
+    Default: 20
+    MinValue: 12
     MaxValue: 60
-    Description: Disco raiz en GiB (imagenes Docker + copia importada en k3s).
+    Description: Disco raiz en GiB (sistema, k3s e imagenes descargadas).
 
   RepoUrl:
     Type: String
@@ -126,10 +127,9 @@ Resources:
           }
           trap 'signal FAILURE "Fallo en la linea $LINENO. Ver /var/log/usn-setup.log"' ERR
 
-          # 1. Paquetes base y Docker (solo para construir las imagenes)
+          # 1. Paquetes base
           apt-get update -y
-          apt-get install -y git curl ca-certificates docker.io
-          systemctl enable --now docker
+          apt-get install -y git curl ca-certificates
 
           # 2. Kubernetes (k3s). Trae metrics-server (HPA) y ServiceLB (LoadBalancer en la IP del nodo)
           curl -sfL https://get.k3s.io | sh -s - --write-kubeconfig-mode 644
@@ -139,7 +139,6 @@ Resources:
           mkdir -p /home/ubuntu/.kube
           cp /etc/rancher/k3s/k3s.yaml /home/ubuntu/.kube/config
           chown -R ubuntu:ubuntu /home/ubuntu/.kube
-          usermod -aG docker ubuntu
           echo 'export KUBECONFIG=/home/ubuntu/.kube/config' >> /home/ubuntu/.bashrc
           echo 'alias k="kubectl -n usn"' >> /home/ubuntu/.bashrc
 
@@ -148,22 +147,18 @@ Resources:
           chown -R ubuntu:ubuntu /home/ubuntu/app
           cd /home/ubuntu/app
 
-          # 4. Imagenes: se construyen en la EC2 y se importan en k3s (sin Docker Hub)
-          docker build -t teriyaki08/usn-backend:v1 backend
-          docker build -t teriyaki08/usn-socket:v1 socket
-          docker build -t teriyaki08/usn-ai-service:v1 ai-service
-          docker build -t teriyaki08/usn-frontend:v1 --build-arg APP_VERSION=v1 client
-          docker build -t teriyaki08/usn-frontend:v2 --build-arg APP_VERSION=v2 client
-          for img in usn-backend:v1 usn-socket:v1 usn-ai-service:v1 usn-frontend:v1 usn-frontend:v2; do
-            docker save teriyaki08/$img | k3s ctr images import -
-          done
+          # 4. Imagenes: las publica GitHub Actions en ghcr.io; k3s las descarga al aplicar
+          #    los manifiestos (imagePullPolicy: IfNotPresent)
 
           # 5. Despliegue (las claves de Cloudinary van a un Secret, nunca al repo ni a la imagen)
           kubectl apply -f k8s/00-namespace.yaml
           set +x   # no escribir las claves en /var/log/usn-setup.log
           kubectl -n usn create secret generic jwt-secret --from-literal=JWT_SECRET="$(openssl rand -base64 48)"
           if [ -n '${CloudinaryCloudName}' ]; then
-            kubectl -n usn create secret generic cloudinary-secret               --from-literal=CLOUDINARY_CLOUD_NAME='${CloudinaryCloudName}'               --from-literal=CLOUDINARY_API_KEY='${CloudinaryApiKey}'               --from-literal=CLOUDINARY_API_SECRET='${CloudinaryApiSecret}'
+            kubectl -n usn create secret generic cloudinary-secret \
+              --from-literal=CLOUDINARY_CLOUD_NAME='${CloudinaryCloudName}' \
+              --from-literal=CLOUDINARY_API_KEY='${CloudinaryApiKey}' \
+              --from-literal=CLOUDINARY_API_SECRET='${CloudinaryApiSecret}'
           fi
           set -x
           kubectl apply -f k8s/

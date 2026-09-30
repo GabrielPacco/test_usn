@@ -34,7 +34,7 @@ k wait --for=condition=ready pod -l app=mysql --timeout=180s
 ## 4. Rolling update sin caída
 ```bash
 while true; do curl -s localhost/version; sleep 0.3; done     # terminal 1 (en AWS: http://<IP>/version)
-k set image deployment/frontend-deployment frontend=teriyaki08/usn-frontend:v2
+k set image deployment/frontend-deployment frontend=ghcr.io/gabrielpacco/usn-frontend:v2
 k rollout status deployment/frontend-deployment
 k rollout undo deployment/frontend-deployment                 # volver a v1
 ```
@@ -47,9 +47,12 @@ k logs -l app=socket --tail=5 --prefix                        # usuarios reparti
 ```
 Sin Redis solo llegaba ~45 % de los mensajes (cada pod tenía su propia lista de usuarios).
 
-## Tras cambiar código (solo en local, Docker Desktop con kind)
-```bash
-docker build -t teriyaki08/usn-backend:v1 backend
-./cargar-imagenes.sh usn-backend:v1
-k rollout restart deployment/backend-deployment
-```
+## Tras cambiar código
+- **Normal:** `git push` a `main` → GitHub Actions publica las imágenes en ghcr.io → `k rollout restart deployment/<nombre>`
+  (con `imagePullPolicy: IfNotPresent`, para forzar la descarga de un tag ya existente borra el pod o usa un tag nuevo).
+- **Probar sin publicar (Docker Desktop):**
+  ```bash
+  docker build -t ghcr.io/gabrielpacco/usn-backend:v1 backend
+  ./cargar-imagenes.sh usn-backend:v1
+  k rollout restart deployment/backend-deployment
+  ```

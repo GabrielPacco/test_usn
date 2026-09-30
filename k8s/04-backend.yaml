@@ -23,8 +23,8 @@ spec:
     spec:
       containers:
         - name: backend
-          image: teriyaki08/usn-backend:v1
-          imagePullPolicy: Never
+          image: ghcr.io/gabrielpacco/usn-backend:v1
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 5000
               name: http

@@ -22,8 +22,8 @@ spec:
     spec:
       containers:
         - name: ai-service
-          image: teriyaki08/usn-ai-service:v1
-          imagePullPolicy: Never
+          image: ghcr.io/gabrielpacco/usn-ai-service:v1
+          imagePullPolicy: IfNotPresent
           # Detrás de nginx en /ai: root-path hace que /ai/docs cargue /ai/openapi.json
           args: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--root-path", "/ai"]
           ports:

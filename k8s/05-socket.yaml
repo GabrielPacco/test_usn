@@ -22,8 +22,8 @@ spec:
     spec:
       containers:
         - name: socket
-          image: teriyaki08/usn-socket:v1
-          imagePullPolicy: Never
+          image: ghcr.io/gabrielpacco/usn-socket:v1
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8800
               name: ws

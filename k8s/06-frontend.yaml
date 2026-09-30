@@ -22,8 +22,8 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: teriyaki08/usn-frontend:v1
-          imagePullPolicy: Never
+          image: ghcr.io/gabrielpacco/usn-frontend:v1
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 80
               name: http
