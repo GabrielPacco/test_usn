@@ -39,6 +39,11 @@ spec:
           operator: Exists
           effect: NoExecute
           tolerationSeconds: 30
+      # No arrancar Spring Boot hasta que MySQL acepte conexiones
+      initContainers:
+        - name: esperar-mysql
+          image: busybox:1.36
+          command: ["sh", "-c", "until nc -z mysql-service 3306; do echo 'esperando a MySQL...'; sleep 3; done"]
       containers:
         - name: backend
           image: ghcr.io/gabrielpacco/usn-backend:v1
