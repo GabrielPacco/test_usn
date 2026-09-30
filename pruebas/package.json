@@ -1,0 +1,6 @@
+{
+  "name": "usn-pruebas",
+  "private": true,
+  "scripts": { "chat": "node test-chat.js" },
+  "dependencies": { "socket.io-client": "^4.7.2" }
+}

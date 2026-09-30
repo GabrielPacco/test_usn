@@ -1,0 +1,39 @@
+# Carga sostenida contra /auth/login (BCrypt consume CPU) para disparar el HPA.
+# Uso: kubectl apply -f k8s/pruebas/09-stress-cpu.yaml ; kubectl get hpa -n usn -w
+# Parar: kubectl delete -f k8s/pruebas/09-stress-cpu.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: stress-cpu
+  namespace: usn
+spec:
+  parallelism: 3
+  completions: 3
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: carga
+          image: curlimages/curl:latest
+          env:
+            - name: WORKERS
+              value: "8"
+            - name: DURACION
+              value: "240"
+          command: ["sh", "-c"]
+          args:
+            - |
+              USER="stress$(hostname | tail -c 6)"
+              URL=http://backend-service:5000/auth
+              curl -s -o /dev/null -X POST $URL/register -H 'Content-Type: application/json' \
+                -d "{\"username\":\"$USER\",\"password\":\"clave123\",\"firstname\":\"S\",\"lastname\":\"T\",\"country\":\"PE\"}"
+              FIN=$(( $(date +%s) + DURACION ))
+              for w in $(seq $WORKERS); do
+                ( n=0; while [ $(date +%s) -lt $FIN ]; do
+                    curl -s -o /dev/null -X POST $URL/login -H 'Content-Type: application/json' \
+                      -d "{\"username\":\"$USER\",\"password\":\"clave123\"}"; n=$((n+1)); done
+                  echo "worker $w: $n logins" ) &
+              done
+              wait

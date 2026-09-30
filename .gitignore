@@ -1,0 +1,17 @@
+# Secretos (usar backend/.env.example como plantilla)
+.env
+**/.env
+
+# Dependencias y builds
+node_modules/
+client/build/
+backend/target/
+backend/build/
+backend/.gradle/
+__pycache__/
+*.pyc
+
+# Logs y editor
+*.log
+.vscode/
+.idea/
