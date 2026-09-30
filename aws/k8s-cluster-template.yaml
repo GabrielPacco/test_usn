@@ -1,8 +1,8 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
-  Universe Social Network sobre un clúster Kubernetes (kubeadm) de 3 nodos en AWS: 1 control-plane
-  y 2 workers, red Flannel, metrics-server, driver EBS CSI y un Application Load Balancer público.
-  El stack termina (CREATE_COMPLETE) solo cuando la aplicación responde a través del balanceador.
+  Universe Social Network sobre un cluster Kubernetes (kubeadm) de 3 nodos en AWS: 1 control-plane
+  y 2 workers, red Flannel, metrics-server, driver EBS CSI y un Application Load Balancer publico.
+  El stack termina (CREATE_COMPLETE) solo cuando la aplicacion responde a traves del balanceador.
 
 Parameters:
   ControlPlaneInstanceType:
@@ -15,18 +15,18 @@ Parameters:
     Type: String
     Default: t3.large
     AllowedValues: [t3.medium, t3.large, t3.xlarge]
-    Description: Nodos worker, donde corren los pods de la aplicación.
+    Description: Nodos worker, donde corren los pods de la aplicacion.
 
   KubernetesVersion:
     Type: String
     Default: v1.34
     AllowedPattern: '^v1\.\d+$'
-    Description: Versión menor de Kubernetes (repositorio oficial pkgs.k8s.io).
+    Description: Version menor de Kubernetes (repositorio oficial pkgs.k8s.io).
 
   KeyName:
     Type: String
     Default: ''
-    Description: (Opcional) Par de claves para SSH. Vacío = entrar con EC2 Instance Connect.
+    Description: (Opcional) Par de claves para SSH. Vacio = entrar con EC2 Instance Connect.
 
   SSHCidr:
     Type: String
@@ -64,7 +64,7 @@ Parameters:
   LatestUbuntuAmi:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id
-    Description: AMI de Ubuntu 22.04 más reciente.
+    Description: AMI de Ubuntu 22.04 mas reciente.
 
 Conditions:
   HasKeyName: !Not [!Equals [!Ref KeyName, '']]
@@ -90,7 +90,7 @@ Resources:
       VpcId: !Ref VPC
       InternetGatewayId: !Ref InternetGateway
 
-  # Los 3 nodos van en la subred A (misma zona): así el disco EBS de MySQL puede
+  # Los 3 nodos van en la subred A (misma zona): asi el disco EBS de MySQL puede
   # conectarse a cualquier worker. La subred B existe porque el ALB exige dos zonas.
   SubnetA:
     Type: AWS::EC2::Subnet
@@ -156,7 +156,7 @@ Resources:
         - {IpProtocol: tcp, FromPort: 30080, ToPort: 30080, SourceSecurityGroupId: !Ref ALBSecurityGroup}
       Tags: [{Key: Name, Value: usn-nodes-sg}]
 
-  # Tráfico interno del clúster (API server, kubelet, VXLAN de Flannel, etc.)
+  # Trafico interno del cluster (API server, kubelet, VXLAN de Flannel, etc.)
   NodeSelfIngress:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
@@ -199,7 +199,7 @@ Resources:
     Properties:
       Roles: [!Ref NodeRole]
 
-  # ------------------------------------------------------------------ Señal de fin
+  # ------------------------------------------------------------------ Senal de fin
   WaitHandle:
     Type: AWS::CloudFormation::WaitConditionHandle
 
@@ -240,7 +240,7 @@ Resources:
           }
           trap 'signal FAILURE "Fallo en la linea $LINENO del control-plane. Ver /var/log/usn-setup.log"' ERR
 
-          # 1. Requisitos de Kubernetes: módulos del kernel, reenvío de paquetes, sin swap
+          # 1. Requisitos de Kubernetes: modulos del kernel, reenvio de paquetes, sin swap
           printf 'overlay\nbr_netfilter\n' > /etc/modules-load.d/k8s.conf
           modprobe overlay; modprobe br_netfilter
           printf 'net.bridge.bridge-nf-call-iptables=1\nnet.bridge.bridge-nf-call-ip6tables=1\nnet.ipv4.ip_forward=1\n' > /etc/sysctl.d/k8s.conf
@@ -264,7 +264,7 @@ Resources:
           apt-mark hold kubelet kubeadm kubectl
           snap install aws-cli --classic
 
-          # 4. Crear el clúster
+          # 4. Crear el cluster
           IP=$(hostname -I | awk '{print $1}')
           kubeadm init --pod-network-cidr=10.244.0.0/16 --apiserver-advertise-address=$IP
           export KUBECONFIG=/etc/kubernetes/admin.conf
@@ -274,7 +274,7 @@ Resources:
           echo 'alias k="kubectl -n usn"' >> /home/ubuntu/.bashrc
           echo 'export PAGER=cat GIT_PAGER=cat' >> /home/ubuntu/.bashrc
 
-          # 5. Red de pods (Flannel) y publicación del comando de unión para los workers
+          # 5. Red de pods (Flannel) y publicacion del comando de union para los workers
           kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
           JOIN=$(kubeadm token create --print-join-command)
           aws ssm put-parameter --region ${AWS::Region} --name '${JoinParameter}' --value "$JOIN" --overwrite
@@ -292,7 +292,7 @@ Resources:
           helm upgrade --install aws-ebs-csi-driver aws-ebs-csi-driver/aws-ebs-csi-driver --namespace kube-system
           kubectl -n kube-system rollout status deployment/ebs-csi-controller --timeout=600s
 
-          # 8. Aplicación
+          # 8. Aplicacion
           git clone -b '${RepoBranch}' '${RepoUrl}' /home/ubuntu/app
           chown -R ubuntu:ubuntu /home/ubuntu/app
           cd /home/ubuntu/app
@@ -312,10 +312,10 @@ Resources:
             kubectl -n usn rollout status deployment/$d-deployment --timeout=900s
           done
 
-          # 9. Comprobación a través del NodePort y aviso a CloudFormation
+          # 9. Comprobacion a traves del NodePort y aviso a CloudFormation
           for i in $(seq 1 60); do
             if curl -sf http://localhost:30080/version && curl -sf -o /dev/null http://localhost:30080/ai/health; then
-              echo "Clúster Kubernetes y Universe Social Network listos." > /home/ubuntu/k8s_ready.txt
+              echo "Cluster Kubernetes y Universe Social Network listos." > /home/ubuntu/k8s_ready.txt
               signal SUCCESS "Cluster de 3 nodos y aplicacion listos"
               exit 0
             fi
@@ -361,7 +361,7 @@ Resources:
           apt-get install -y kubelet kubeadm
           apt-mark hold kubelet kubeadm
           snap install aws-cli --classic
-          # Esperar el comando de unión que publica el control-plane y unirse al clúster
+          # Esperar el comando de union que publica el control-plane y unirse al cluster
           until JOIN=$(aws ssm get-parameter --region ${AWS::Region} --name '${JoinParameter}' --query Parameter.Value --output text) && [ "$JOIN" != "pendiente" ]; do sleep 10; done
           eval "$JOIN"
 
@@ -406,7 +406,7 @@ Resources:
           until JOIN=$(aws ssm get-parameter --region ${AWS::Region} --name '${JoinParameter}' --query Parameter.Value --output text) && [ "$JOIN" != "pendiente" ]; do sleep 10; done
           eval "$JOIN"
 
-  # ------------------------------------------------------------------ Balanceador público
+  # ------------------------------------------------------------------ Balanceador publico
   LoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     DependsOn: GatewayAttachment
@@ -417,7 +417,7 @@ Resources:
       Subnets: [!Ref SubnetA, !Ref SubnetB]
       SecurityGroups: [!Ref ALBSecurityGroup]
       LoadBalancerAttributes:
-        # Conexiones WebSocket del chat de larga duración
+        # Conexiones WebSocket del chat de larga duracion
         - {Key: idle_timeout.timeout_seconds, Value: '3600'}
 
   TargetGroup:
@@ -448,16 +448,16 @@ Resources:
 
 Outputs:
   AppURL:
-    Description: Aplicación web (a través del Application Load Balancer)
+    Description: Aplicacion web (a traves del Application Load Balancer)
     Value: !Sub 'http://${LoadBalancer.DNSName}'
   VersionURL:
-    Description: Versión desplegada del frontend (demo de rolling update)
+    Description: Version desplegada del frontend (demo de rolling update)
     Value: !Sub 'http://${LoadBalancer.DNSName}/version'
   AIDocsURL:
-    Description: Documentación OpenAPI del servicio de IA
+    Description: Documentacion OpenAPI del servicio de IA
     Value: !Sub 'http://${LoadBalancer.DNSName}/ai/docs'
   ControlPlaneId:
-    Description: Instancia control-plane (conectarse aquí para usar kubectl)
+    Description: Instancia control-plane (conectarse aqui para usar kubectl)
     Value: !Ref ControlPlane
   Worker1Id:
     Description: Worker 1
