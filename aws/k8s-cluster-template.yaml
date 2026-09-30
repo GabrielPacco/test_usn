@@ -1,0 +1,467 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Universe Social Network sobre un clúster Kubernetes (kubeadm) de 3 nodos en AWS: 1 control-plane
+  y 2 workers, red Flannel, metrics-server, driver EBS CSI y un Application Load Balancer público.
+  El stack termina (CREATE_COMPLETE) solo cuando la aplicación responde a través del balanceador.
+
+Parameters:
+  ControlPlaneInstanceType:
+    Type: String
+    Default: t3.medium
+    AllowedValues: [t3.medium, t3.large]
+    Description: Nodo control-plane (kubeadm necesita al menos 2 vCPU y 2 GiB).
+
+  WorkerInstanceType:
+    Type: String
+    Default: t3.large
+    AllowedValues: [t3.medium, t3.large, t3.xlarge]
+    Description: Nodos worker, donde corren los pods de la aplicación.
+
+  KubernetesVersion:
+    Type: String
+    Default: v1.34
+    AllowedPattern: '^v1\.\d+$'
+    Description: Versión menor de Kubernetes (repositorio oficial pkgs.k8s.io).
+
+  KeyName:
+    Type: String
+    Default: ''
+    Description: (Opcional) Par de claves para SSH. Vacío = entrar con EC2 Instance Connect.
+
+  SSHCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    Description: Rango de IPs que pueden entrar por SSH.
+
+  RepoUrl:
+    Type: String
+    Default: https://github.com/GabrielPacco/test_usn.git
+    Description: Repositorio con los manifiestos de k8s/.
+
+  RepoBranch:
+    Type: String
+    Default: main
+    Description: Rama a desplegar.
+
+  CloudinaryCloudName:
+    Type: String
+    Default: ''
+    Description: (Opcional) Cloudinary para subir fotos.
+
+  CloudinaryApiKey:
+    Type: String
+    Default: ''
+    NoEcho: true
+    Description: (Opcional) API key de Cloudinary.
+
+  CloudinaryApiSecret:
+    Type: String
+    Default: ''
+    NoEcho: true
+    Description: (Opcional) API secret de Cloudinary.
+
+  LatestUbuntuAmi:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id
+    Description: AMI de Ubuntu 22.04 más reciente.
+
+Conditions:
+  HasKeyName: !Not [!Equals [!Ref KeyName, '']]
+
+Resources:
+  # ------------------------------------------------------------------ Red
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{Key: Name, Value: usn-vpc}]
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags: [{Key: Name, Value: usn-igw}]
+
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Los 3 nodos van en la subred A (misma zona): así el disco EBS de MySQL puede
+  # conectarse a cualquier worker. La subred B existe porque el ALB exige dos zonas.
+  SubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags: [{Key: Name, Value: usn-subnet-a}]
+
+  SubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags: [{Key: Name, Value: usn-subnet-b}]
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags: [{Key: Name, Value: usn-public-rt}]
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetARouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetA
+      RouteTableId: !Ref RouteTable
+
+  SubnetBRouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetB
+      RouteTableId: !Ref RouteTable
+
+  # ------------------------------------------------------------------ Seguridad
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ALB publico - HTTP 80
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - {IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0}
+      Tags: [{Key: Name, Value: usn-alb-sg}]
+
+  NodeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Nodos Kubernetes - SSH y NodePort 30080 solo desde el ALB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - {IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: !Ref SSHCidr}
+        - {IpProtocol: tcp, FromPort: 30080, ToPort: 30080, SourceSecurityGroupId: !Ref ALBSecurityGroup}
+      Tags: [{Key: Name, Value: usn-nodes-sg}]
+
+  # Tráfico interno del clúster (API server, kubelet, VXLAN de Flannel, etc.)
+  NodeSelfIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref NodeSecurityGroup
+      IpProtocol: '-1'
+      SourceSecurityGroupId: !Ref NodeSecurityGroup
+
+  # ------------------------------------------------------------------ Permisos de los nodos
+  JoinParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${AWS::StackName}/kubeadm-join'
+      Type: String
+      Value: pendiente
+      Description: Comando kubeadm join que publica el control-plane para los workers
+
+  NodeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ec2.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # El driver EBS CSI crea, conecta y desconecta discos EBS
+        - arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy
+      Policies:
+        - PolicyName: kubeadm-join-parameter
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [ssm:GetParameter, ssm:PutParameter]
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}/kubeadm-join'
+
+  NodeInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref NodeRole]
+
+  # ------------------------------------------------------------------ Señal de fin
+  WaitHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+
+  WaitCondition:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn: ControlPlane
+    Properties:
+      Handle: !Ref WaitHandle
+      Timeout: '3000'
+      Count: 1
+
+  # ------------------------------------------------------------------ Nodos
+  ControlPlane:
+    Type: AWS::EC2::Instance
+    DependsOn: DefaultRoute
+    Properties:
+      InstanceType: !Ref ControlPlaneInstanceType
+      ImageId: !Ref LatestUbuntuAmi
+      KeyName: !If [HasKeyName, !Ref KeyName, !Ref 'AWS::NoValue']
+      SubnetId: !Ref SubnetA
+      SecurityGroupIds: [!Ref NodeSecurityGroup]
+      IamInstanceProfile: !Ref NodeInstanceProfile
+      MetadataOptions: {HttpTokens: required, HttpPutResponseHopLimit: 2}
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs: {VolumeSize: 20, VolumeType: gp3, DeleteOnTermination: true}
+      Tags: [{Key: Name, Value: usn-control-plane}, {Key: Project, Value: UniverseSocialNetwork}]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          exec > >(tee -a /var/log/usn-setup.log) 2>&1
+          export HOME=/root
+          signal() {
+            curl -s -X PUT -H 'Content-Type:' \
+              --data-binary "{\"Status\":\"$1\",\"Reason\":\"$2\",\"UniqueId\":\"usn\",\"Data\":\"$2\"}" \
+              '${WaitHandle}' || true
+          }
+          trap 'signal FAILURE "Fallo en la linea $LINENO del control-plane. Ver /var/log/usn-setup.log"' ERR
+
+          # 1. Requisitos de Kubernetes: módulos del kernel, reenvío de paquetes, sin swap
+          printf 'overlay\nbr_netfilter\n' > /etc/modules-load.d/k8s.conf
+          modprobe overlay; modprobe br_netfilter
+          printf 'net.bridge.bridge-nf-call-iptables=1\nnet.bridge.bridge-nf-call-ip6tables=1\nnet.ipv4.ip_forward=1\n' > /etc/sysctl.d/k8s.conf
+          sysctl --system
+          swapoff -a
+
+          # 2. Runtime de contenedores (containerd) con cgroups de systemd
+          apt-get update -y
+          apt-get install -y containerd apt-transport-https ca-certificates curl gpg git
+          mkdir -p /etc/containerd
+          containerd config default > /etc/containerd/config.toml
+          sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+          systemctl restart containerd
+
+          # 3. kubeadm, kubelet y kubectl desde el repositorio oficial de Kubernetes
+          mkdir -p /etc/apt/keyrings
+          curl -fsSL https://pkgs.k8s.io/core:/stable:/${KubernetesVersion}/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+          echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/${KubernetesVersion}/deb/ /' > /etc/apt/sources.list.d/kubernetes.list
+          apt-get update -y
+          apt-get install -y kubelet kubeadm kubectl
+          apt-mark hold kubelet kubeadm kubectl
+          snap install aws-cli --classic
+
+          # 4. Crear el clúster
+          IP=$(hostname -I | awk '{print $1}')
+          kubeadm init --pod-network-cidr=10.244.0.0/16 --apiserver-advertise-address=$IP
+          export KUBECONFIG=/etc/kubernetes/admin.conf
+          mkdir -p /home/ubuntu/.kube
+          cp /etc/kubernetes/admin.conf /home/ubuntu/.kube/config
+          chown -R ubuntu:ubuntu /home/ubuntu/.kube
+          echo 'alias k="kubectl -n usn"' >> /home/ubuntu/.bashrc
+          echo 'export PAGER=cat GIT_PAGER=cat' >> /home/ubuntu/.bashrc
+
+          # 5. Red de pods (Flannel) y publicación del comando de unión para los workers
+          kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+          JOIN=$(kubeadm token create --print-join-command)
+          aws ssm put-parameter --region ${AWS::Region} --name '${JoinParameter}' --value "$JOIN" --overwrite
+
+          # 6. Esperar a los 2 workers
+          until [ "$(kubectl get nodes --no-headers | grep -cw Ready)" -ge 3 ]; do sleep 10; done
+
+          # 7. metrics-server (para el HPA) y driver EBS CSI (discos persistentes)
+          kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+          kubectl -n kube-system patch deployment metrics-server --type=json \
+            -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          helm repo add aws-ebs-csi-driver https://kubernetes-sigs.github.io/aws-ebs-csi-driver
+          helm repo update
+          helm upgrade --install aws-ebs-csi-driver aws-ebs-csi-driver/aws-ebs-csi-driver --namespace kube-system
+          kubectl -n kube-system rollout status deployment/ebs-csi-controller --timeout=600s
+
+          # 8. Aplicación
+          git clone -b '${RepoBranch}' '${RepoUrl}' /home/ubuntu/app
+          chown -R ubuntu:ubuntu /home/ubuntu/app
+          cd /home/ubuntu/app
+          kubectl apply -f k8s/00-namespace.yaml
+          set +x   # no escribir claves en el log
+          kubectl -n usn create secret generic jwt-secret --from-literal=JWT_SECRET="$(openssl rand -base64 48)"
+          if [ -n '${CloudinaryCloudName}' ]; then
+            kubectl -n usn create secret generic cloudinary-secret \
+              --from-literal=CLOUDINARY_CLOUD_NAME='${CloudinaryCloudName}' \
+              --from-literal=CLOUDINARY_API_KEY='${CloudinaryApiKey}' \
+              --from-literal=CLOUDINARY_API_SECRET='${CloudinaryApiSecret}'
+          fi
+          set -x
+          kubectl apply -f k8s/
+          kubectl -n usn rollout status statefulset/mysql --timeout=900s
+          for d in redis backend socket ai-service frontend; do
+            kubectl -n usn rollout status deployment/$d-deployment --timeout=900s
+          done
+
+          # 9. Comprobación a través del NodePort y aviso a CloudFormation
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:30080/version && curl -sf -o /dev/null http://localhost:30080/ai/health; then
+              echo "Clúster Kubernetes y Universe Social Network listos." > /home/ubuntu/k8s_ready.txt
+              signal SUCCESS "Cluster de 3 nodos y aplicacion listos"
+              exit 0
+            fi
+            sleep 5
+          done
+          signal FAILURE "La aplicacion no respondio en el NodePort 30080"
+
+  Worker1:
+    Type: AWS::EC2::Instance
+    DependsOn: DefaultRoute
+    Properties:
+      InstanceType: !Ref WorkerInstanceType
+      ImageId: !Ref LatestUbuntuAmi
+      KeyName: !If [HasKeyName, !Ref KeyName, !Ref 'AWS::NoValue']
+      SubnetId: !Ref SubnetA
+      SecurityGroupIds: [!Ref NodeSecurityGroup]
+      IamInstanceProfile: !Ref NodeInstanceProfile
+      MetadataOptions: {HttpTokens: required, HttpPutResponseHopLimit: 2}
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs: {VolumeSize: 30, VolumeType: gp3, DeleteOnTermination: true}
+      Tags: [{Key: Name, Value: usn-worker-1}, {Key: Project, Value: UniverseSocialNetwork}]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          exec > >(tee -a /var/log/usn-setup.log) 2>&1
+          printf 'overlay\nbr_netfilter\n' > /etc/modules-load.d/k8s.conf
+          modprobe overlay; modprobe br_netfilter
+          printf 'net.bridge.bridge-nf-call-iptables=1\nnet.bridge.bridge-nf-call-ip6tables=1\nnet.ipv4.ip_forward=1\n' > /etc/sysctl.d/k8s.conf
+          sysctl --system
+          swapoff -a
+          apt-get update -y
+          apt-get install -y containerd apt-transport-https ca-certificates curl gpg
+          mkdir -p /etc/containerd
+          containerd config default > /etc/containerd/config.toml
+          sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+          systemctl restart containerd
+          mkdir -p /etc/apt/keyrings
+          curl -fsSL https://pkgs.k8s.io/core:/stable:/${KubernetesVersion}/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+          echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/${KubernetesVersion}/deb/ /' > /etc/apt/sources.list.d/kubernetes.list
+          apt-get update -y
+          apt-get install -y kubelet kubeadm
+          apt-mark hold kubelet kubeadm
+          snap install aws-cli --classic
+          # Esperar el comando de unión que publica el control-plane y unirse al clúster
+          until JOIN=$(aws ssm get-parameter --region ${AWS::Region} --name '${JoinParameter}' --query Parameter.Value --output text) && [ "$JOIN" != "pendiente" ]; do sleep 10; done
+          eval "$JOIN"
+
+  Worker2:
+    Type: AWS::EC2::Instance
+    DependsOn: DefaultRoute
+    Properties:
+      InstanceType: !Ref WorkerInstanceType
+      ImageId: !Ref LatestUbuntuAmi
+      KeyName: !If [HasKeyName, !Ref KeyName, !Ref 'AWS::NoValue']
+      SubnetId: !Ref SubnetA
+      SecurityGroupIds: [!Ref NodeSecurityGroup]
+      IamInstanceProfile: !Ref NodeInstanceProfile
+      MetadataOptions: {HttpTokens: required, HttpPutResponseHopLimit: 2}
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs: {VolumeSize: 30, VolumeType: gp3, DeleteOnTermination: true}
+      Tags: [{Key: Name, Value: usn-worker-2}, {Key: Project, Value: UniverseSocialNetwork}]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          exec > >(tee -a /var/log/usn-setup.log) 2>&1
+          printf 'overlay\nbr_netfilter\n' > /etc/modules-load.d/k8s.conf
+          modprobe overlay; modprobe br_netfilter
+          printf 'net.bridge.bridge-nf-call-iptables=1\nnet.bridge.bridge-nf-call-ip6tables=1\nnet.ipv4.ip_forward=1\n' > /etc/sysctl.d/k8s.conf
+          sysctl --system
+          swapoff -a
+          apt-get update -y
+          apt-get install -y containerd apt-transport-https ca-certificates curl gpg
+          mkdir -p /etc/containerd
+          containerd config default > /etc/containerd/config.toml
+          sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+          systemctl restart containerd
+          mkdir -p /etc/apt/keyrings
+          curl -fsSL https://pkgs.k8s.io/core:/stable:/${KubernetesVersion}/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+          echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/${KubernetesVersion}/deb/ /' > /etc/apt/sources.list.d/kubernetes.list
+          apt-get update -y
+          apt-get install -y kubelet kubeadm
+          apt-mark hold kubelet kubeadm
+          snap install aws-cli --classic
+          until JOIN=$(aws ssm get-parameter --region ${AWS::Region} --name '${JoinParameter}' --query Parameter.Value --output text) && [ "$JOIN" != "pendiente" ]; do sleep 10; done
+          eval "$JOIN"
+
+  # ------------------------------------------------------------------ Balanceador público
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn: GatewayAttachment
+    Properties:
+      Name: !Sub '${AWS::StackName}-alb'
+      Scheme: internet-facing
+      Type: application
+      Subnets: [!Ref SubnetA, !Ref SubnetB]
+      SecurityGroups: [!Ref ALBSecurityGroup]
+      LoadBalancerAttributes:
+        # Conexiones WebSocket del chat de larga duración
+        - {Key: idle_timeout.timeout_seconds, Value: '3600'}
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VPC
+      Protocol: HTTP
+      Port: 30080
+      TargetType: instance
+      Targets:
+        - {Id: !Ref Worker1, Port: 30080}
+        - {Id: !Ref Worker2, Port: 30080}
+      HealthCheckPath: /version
+      HealthCheckIntervalSeconds: 10
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      TargetGroupAttributes:
+        - {Key: deregistration_delay.timeout_seconds, Value: '10'}
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - {Type: forward, TargetGroupArn: !Ref TargetGroup}
+
+Outputs:
+  AppURL:
+    Description: Aplicación web (a través del Application Load Balancer)
+    Value: !Sub 'http://${LoadBalancer.DNSName}'
+  VersionURL:
+    Description: Versión desplegada del frontend (demo de rolling update)
+    Value: !Sub 'http://${LoadBalancer.DNSName}/version'
+  AIDocsURL:
+    Description: Documentación OpenAPI del servicio de IA
+    Value: !Sub 'http://${LoadBalancer.DNSName}/ai/docs'
+  ControlPlaneId:
+    Description: Instancia control-plane (conectarse aquí para usar kubectl)
+    Value: !Ref ControlPlane
+  Worker1Id:
+    Description: Worker 1
+    Value: !Ref Worker1
+  Worker2Id:
+    Description: Worker 2
+    Value: !Ref Worker2

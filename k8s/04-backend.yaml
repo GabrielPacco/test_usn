@@ -21,6 +21,24 @@ spec:
       labels:
         app: backend
     spec:
+      # Repartir las réplicas entre los nodos: si cae uno, siempre queda otra réplica viva
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: backend
+      # Si su nodo deja de responder, mover el pod tras 30 s (por defecto son 300 s)
+      tolerations:
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30
       containers:
         - name: backend
           image: ghcr.io/gabrielpacco/usn-backend:v1

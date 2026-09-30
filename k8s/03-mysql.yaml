@@ -1,35 +1,35 @@
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: mysql-pvc
-  namespace: usn
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 5Gi
----
+# MySQL como StatefulSet con un disco EBS propio. Si cae el nodo donde corre, Kubernetes
+# recrea el pod en otro nodo y el driver CSI vuelve a conectar el mismo disco: sin pérdida de datos.
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
-  name: mysql-deployment
+  name: mysql
   namespace: usn
   labels:
     app: mysql
 spec:
+  serviceName: mysql-service
   replicas: 1
   selector:
     matchLabels:
       app: mysql
-  strategy:
-    type: Recreate
   template:
     metadata:
       labels:
         app: mysql
     spec:
       priorityClassName: usn-critico
+      terminationGracePeriodSeconds: 30
+      # Si su nodo deja de responder, mover el pod tras 30 s (por defecto son 300 s)
+      tolerations:
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30
       containers:
         - name: mysql
           image: mysql:8.0
@@ -55,29 +55,37 @@ spec:
               cpu: 1000m
               memory: 1Gi
           volumeMounts:
-            - name: mysql-persistent-storage
+            - name: data
               mountPath: /var/lib/mysql
+              subPath: mysql
             - name: mysql-init-volume
               mountPath: /docker-entrypoint-initdb.d
           readinessProbe:
             exec:
-              command: ["mysqladmin", "ping", "-h", "localhost", "-u", "root", "-padmin"]
+              command: ["sh", "-c", "mysqladmin ping -h localhost -u root -p\"$MYSQL_ROOT_PASSWORD\""]
             initialDelaySeconds: 15
             periodSeconds: 10
             timeoutSeconds: 5
           livenessProbe:
             exec:
-              command: ["mysqladmin", "ping", "-h", "localhost", "-u", "root", "-padmin"]
-            initialDelaySeconds: 30
+              command: ["sh", "-c", "mysqladmin ping -h localhost -u root -p\"$MYSQL_ROOT_PASSWORD\""]
+            initialDelaySeconds: 60
             periodSeconds: 15
             timeoutSeconds: 5
       volumes:
-        - name: mysql-persistent-storage
-          persistentVolumeClaim:
-            claimName: mysql-pvc
         - name: mysql-init-volume
           configMap:
             name: mysql-init-scripts
+  # Un PersistentVolumeClaim (y su disco EBS) por réplica: data-mysql-0
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: ebs-gp3
+        resources:
+          requests:
+            storage: 5Gi
 ---
 apiVersion: v1
 kind: Service
