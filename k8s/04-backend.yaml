@@ -61,7 +61,8 @@ spec:
                 optional: true
           resources:
             requests:
-              cpu: 200m
+              # 100m: las 6 réplicas del HPA caben en una t3.large (2 vCPU)
+              cpu: 100m
               memory: 512Mi
             limits:
               cpu: 500m

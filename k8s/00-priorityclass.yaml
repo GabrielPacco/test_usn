@@ -1,0 +1,10 @@
+# Prioridad para los servicios con estado (MySQL, Redis). Si el nodo se queda sin CPU
+# (por ejemplo, cuando el HPA sube el backend a 6 réplicas), el scheduler expulsa pods de
+# menor prioridad para que la base de datos siempre pueda arrancar.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: usn-critico
+value: 100000
+globalDefault: false
+description: Servicios de datos de Universe Social Network (MySQL, Redis)

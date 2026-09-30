@@ -29,6 +29,7 @@ spec:
       labels:
         app: mysql
     spec:
+      priorityClassName: usn-critico
       containers:
         - name: mysql
           image: mysql:8.0
