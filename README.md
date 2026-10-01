@@ -33,6 +33,8 @@ aws/k8s-cluster-template.yaml    CloudFormation: VPC, 3 EC2 (kubeadm), ALB, IAM
 k8s/                             Manifiestos (namespace, secrets, MySQL, servicios, HPA)
 k8s/pruebas/09-stress-cpu.yaml   Job de carga para la prueba del HPA
 pruebas/test-chat.js             Prueba del chat con varias réplicas
+pruebas/simular.js               Crea usuarios, publicaciones, chats y mensajes a través del ALB
+pruebas/usn-demo.sh, demo.sh     Atajos del control-plane (k, q, conteo) y demo completa en una terminal
 backend/  client/  socket/  ai-service/   Código de cada microservicio
 docker-compose.yml + init.sql    Ejecución local para desarrollo
 ```
